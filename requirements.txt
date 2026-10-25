@@ -1,0 +1,6 @@
+yfinance
+pandas
+numpy
+# Level 2 (FinBERT), CUDA build: pip install torch --index-url https://download.pytorch.org/whl/cu126
+torch
+transformers

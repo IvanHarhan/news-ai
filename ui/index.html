@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>news_ai — обучение</title>
+<style>
+  :root { --bg:#0f1115; --card:#171a21; --line:#262b36; --text:#e6e8ee; --dim:#8b93a5;
+          --up:#3fb67a; --down:#e5534b; --accent:#6ea8fe; --train:#f0b44c; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:14px/1.45 system-ui, sans-serif; }
+  header { padding:16px 20px; border-bottom:1px solid var(--line); display:flex; gap:16px; align-items:baseline; flex-wrap:wrap; }
+  header h1 { font-size:18px; margin:0; }
+  #status { color:var(--accent); font-weight:600; }
+  main { display:grid; grid-template-columns: minmax(0,1.15fr) minmax(0,1fr); gap:16px; padding:16px 20px; }
+  @media (max-width: 900px) { main { grid-template-columns: minmax(0,1fr); } }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:10px; padding:14px 16px; min-width:0; }
+  .card h2 { font-size:15px; margin:0 0 4px; }
+  .hint { color:var(--dim); font-size:12.5px; margin:0 0 10px; }
+  svg { width:100%; height:auto; display:block; }
+  .legend { display:flex; gap:14px; font-size:12px; color:var(--dim); margin-top:6px; }
+  .legend i { display:inline-block; width:14px; height:3px; vertical-align:middle; margin-right:5px; }
+  table { width:100%; border-collapse:collapse; font-variant-numeric:tabular-nums; }
+  td, th { padding:5px 6px; border-bottom:1px solid var(--line); text-align:right; }
+  th:first-child, td:first-child { text-align:left; }
+  th { color:var(--dim); font-weight:500; }
+  .pos { color:var(--up); } .neg { color:var(--down); }
+  .big { font-size:22px; font-weight:700; }
+  .span2 { grid-column: 1 / -1; }
+  .neuron-pulse { animation: pulse 1.6s ease-in-out infinite; }
+  @keyframes pulse { 50% { opacity:.55; } }
+  .link { transition: stroke-width .6s, opacity .6s; }
+</style>
+</head>
+<body>
+<header>
+  <h1>🧠 news_ai — модель учится читать новости</h1>
+  <span id="status">жду данные…</span>
+  <span id="fold" class="hint" style="margin:0"></span>
+</header>
+<main>
+  <section class="card">
+    <h2 id="netTitle">Нейрон: какие слова тянут прогноз</h2>
+    <p class="hint" id="netHint">Слева слова из заголовков, справа нейрон «акция обгонит рынок?». Толщина линии — сила веса.
+      <span class="pos">Зелёные</span> тянут вверх, <span class="neg">красные</span> вниз. Веса меняются по ходу обучения.</p>
+    <svg id="neuron" viewBox="0 0 640 560"></svg>
+  </section>
+  <section class="card">
+    <h2>Ошибка модели</h2>
+    <p class="hint">Чем ниже, тем лучше. <b>Обучение</b> — на годах, которые модель видит. <b>Проверка</b> — на годе,
+      которого она не видела. Если обучение падает, а проверка растёт — модель зубрит, а не понимает.</p>
+    <svg id="loss" viewBox="0 0 520 220"></svg>
+    <div class="legend"><span><i style="background:var(--train)"></i>обучение</span><span><i style="background:var(--accent)"></i>проверка</span></div>
+    <h2 style="margin-top:16px">Угадывание на проверке (AUC)</h2>
+    <p class="hint">0.5 — монетка. Выше 0.5 — модель хоть что-то понимает. 0.52–0.53 для новостей — уже неплохо.</p>
+    <svg id="auc" viewBox="0 0 520 180"></svg>
+  </section>
+  <section class="card">
+    <h2>Результаты по годам</h2>
+    <p class="hint">Каждый год модель проверяется на данных, которых не видела. Сделка: лонг 10% акций с лучшими оценками,
+      шорт 10% с худшими, держим 1 день или 5 дней. Числа — средний результат сделки до и после издержек
+      (0.05% на каждую сторону).</p>
+    <table id="folds"><thead><tr><th>год проверки</th><th>AUC</th><th>1 день: до</th><th>после</th><th>5 дней: до</th><th>после</th></tr></thead><tbody></tbody></table>
+  </section>
+  <section class="card" id="finalCard">
+    <h2>Итог</h2>
+    <p class="hint">Появится после последнего года. Плацебо — та же стратегия, но акции из тех же новостей выбраны случайно.</p>
+    <div id="final" class="hint">ещё учится…</div>
+    <svg id="equity" viewBox="0 0 520 200"></svg>
+  </section>
+</main>
+<script>
+const NS = "http://www.w3.org/2000/svg";
+const css = v => getComputedStyle(document.documentElement).getPropertyValue(v).trim();
+function el(tag, attrs, parent) {
+  const e = document.createElementNS(NS, tag);
+  for (const k in attrs) e.setAttribute(k, attrs[k]);
+  if (parent) parent.appendChild(e);
+  return e;
+}
+function clear(svg) { while (svg.firstChild) svg.removeChild(svg.firstChild); }
+
+function lineChart(svg, xs, series, opts = {}) {
+  clear(svg);
+  const [W, H] = svg.getAttribute("viewBox").split(" ").slice(2).map(Number);
+  const pad = { l: 46, r: 10, t: 10, b: 22 };
+  const all = series.flatMap(s => s.ys).concat(opts.hline != null ? [opts.hline] : []);
+  if (!xs.length || !all.length) { el("text", { x: W / 2, y: H / 2, fill: css("--dim"), "text-anchor": "middle" }, svg).textContent = "ещё нет точек"; return; }
+  let lo = Math.min(...all), hi = Math.max(...all);
+  if (hi - lo < 1e-6) { lo -= 0.01; hi += 0.01; }
+  const m = (hi - lo) * 0.08; lo -= m; hi += m;
+  const x0 = xs[0], x1 = xs[xs.length - 1] === x0 ? x0 + 1 : xs[xs.length - 1];
+  const X = x => pad.l + (x - x0) / (x1 - x0) * (W - pad.l - pad.r);
+  const Y = y => pad.t + (1 - (y - lo) / (hi - lo)) * (H - pad.t - pad.b);
+  for (let i = 0; i <= 3; i++) {
+    const v = lo + (hi - lo) * i / 3;
+    el("line", { x1: pad.l, x2: W - pad.r, y1: Y(v), y2: Y(v), stroke: css("--line") }, svg);
+    el("text", { x: pad.l - 6, y: Y(v) + 4, fill: css("--dim"), "font-size": 10, "text-anchor": "end" }, svg).textContent = v.toFixed(opts.digits ?? 4);
+  }
+  if (opts.hline != null) el("line", { x1: pad.l, x2: W - pad.r, y1: Y(opts.hline), y2: Y(opts.hline), stroke: css("--dim"), "stroke-dasharray": "4 4" }, svg);
+  if (opts.xlabels) {
+    const n = opts.xlabels.length, step = Math.max(1, Math.floor(n / 5));
+    for (let i = 0; i < n; i += step)
+      el("text", { x: X(xs[i]), y: H - 6, fill: css("--dim"), "font-size": 10, "text-anchor": "middle" }, svg).textContent = opts.xlabels[i];
+  }
+  for (const s of series) {
+    const d = s.ys.map((y, i) => (i ? "L" : "M") + X(xs[i]).toFixed(1) + " " + Y(y).toFixed(1)).join(" ");
+    el("path", { d, fill: "none", stroke: s.color, "stroke-width": 2 }, svg);
+  }
+}
+
+function drawNeuron(svg, words, training) {
+  clear(svg);
+  if (!words || !words.length) return;
+  const W = 640, H = 560, ox = 560, oy = H / 2;
+  const maxW = Math.max(...words.map(w => Math.abs(w[1])), 1e-6);
+  const n = words.length, gap = (H - 30) / (n - 1);
+  words.forEach(([word, w], i) => {
+    const y = 15 + i * gap, x = 205;
+    const width = 0.6 + 7 * Math.abs(w) / maxW;
+    el("path", {
+      class: "link", d: `M${x} ${y} C ${x + 160} ${y}, ${ox - 160} ${oy}, ${ox - 34} ${oy}`,
+      fill: "none", stroke: w >= 0 ? css("--up") : css("--down"),
+      "stroke-width": width.toFixed(2), opacity: (0.25 + 0.75 * Math.abs(w) / maxW).toFixed(2),
+    }, svg);
+    el("circle", { cx: x, cy: y, r: 5, fill: w >= 0 ? css("--up") : css("--down") }, svg);
+    const t = el("text", { x: x - 10, y: y + 4, fill: css("--text"), "font-size": 12, "text-anchor": "end" }, svg);
+    t.textContent = `${word}  ${w >= 0 ? "+" : ""}${w.toFixed(2)}`;
+  });
+  el("circle", { cx: ox, cy: oy, r: 34, fill: css("--card"), stroke: css("--accent"), "stroke-width": 3, class: training ? "neuron-pulse" : "" }, svg);
+  el("text", { x: ox, y: oy - 2, fill: css("--text"), "font-size": 13, "text-anchor": "middle" }, svg).textContent = "обгонит";
+  el("text", { x: ox, y: oy + 14, fill: css("--text"), "font-size": 13, "text-anchor": "middle" }, svg).textContent = "рынок?";
+}
+
+function drawNet(svg, net, training) {
+  // Уровень 2: входы (настроение FinBERT + блок «смысла») → скрытые нейроны → выход.
+  clear(svg);
+  if (!net || !net.hidden || !net.hidden.length) return;
+  const H = 560, xi = 150, xh = 390, xo = 565, oy = H / 2;
+  const nin = net.inputs.length, nh = net.hidden.length;
+  const yi = i => 90 + i * (H - 180) / Math.max(1, nin - 1);
+  const yh = j => 20 + j * (H - 40) / Math.max(1, nh - 1);
+  const maxIn = Math.max(...net.hidden.flatMap(h => h.w_in.map(Math.abs)), 1e-6);
+  const maxOut = Math.max(...net.hidden.map(h => Math.abs(h.w_out)), 1e-6);
+  const isBlock = i => i === nin - 1;   // последний вход — блок из 768 чисел, вес = сила связи без знака
+  net.hidden.forEach((h, j) => {
+    h.w_in.forEach((w, i) => {
+      el("line", {
+        class: "link", x1: xi, y1: yi(i), x2: xh, y2: yh(j),
+        stroke: isBlock(i) ? css("--dim") : (w >= 0 ? css("--up") : css("--down")),
+        "stroke-width": (0.3 + 4 * Math.abs(w) / maxIn).toFixed(2),
+        opacity: (0.15 + 0.7 * Math.abs(w) / maxIn).toFixed(2),
+      }, svg);
+    });
+    el("path", {
+      class: "link", d: `M${xh} ${yh(j)} C ${xh + 90} ${yh(j)}, ${xo - 90} ${oy}, ${xo - 34} ${oy}`, fill: "none",
+      stroke: h.w_out >= 0 ? css("--up") : css("--down"),
+      "stroke-width": (0.6 + 6 * Math.abs(h.w_out) / maxOut).toFixed(2),
+      opacity: (0.3 + 0.7 * Math.abs(h.w_out) / maxOut).toFixed(2),
+    }, svg);
+  });
+  net.inputs.forEach((name, i) => {
+    el(isBlock(i) ? "rect" : "circle", isBlock(i)
+      ? { x: xi - 9, y: yi(i) - 9, width: 18, height: 18, rx: 3, fill: css("--dim") }
+      : { cx: xi, cy: yi(i), r: 8, fill: css("--accent") }, svg);
+    el("text", { x: xi - 16, y: yi(i) + 4, fill: css("--text"), "font-size": 13, "text-anchor": "end" }, svg).textContent = name;
+  });
+  net.hidden.forEach((h, j) => el("circle", { cx: xh, cy: yh(j), r: 7, fill: css("--card"), stroke: h.w_out >= 0 ? css("--up") : css("--down"), "stroke-width": 2 }, svg));
+  el("text", { x: xh, y: H - 2, fill: css("--dim"), "font-size": 11, "text-anchor": "middle" }, svg).textContent = `скрытый слой (${nh} сильнейших)`;
+  el("circle", { cx: xo, cy: oy, r: 34, fill: css("--card"), stroke: css("--accent"), "stroke-width": 3, class: training ? "neuron-pulse" : "" }, svg);
+  el("text", { x: xo, y: oy - 2, fill: css("--text"), "font-size": 13, "text-anchor": "middle" }, svg).textContent = "обгонит";
+  el("text", { x: xo, y: oy + 14, fill: css("--text"), "font-size": 13, "text-anchor": "middle" }, svg).textContent = "рынок?";
+}
+
+const fmt = (v, d = 3) => (v >= 0 ? "+" : "") + v.toFixed(d) + "%";
+const cls = v => v > 0 ? "pos" : v < 0 ? "neg" : "";
+
+async function tick() {
+  let s;
+  try { s = await (await fetch("progress.json?t=" + Date.now())).json(); }
+  catch { setTimeout(tick, 1500); return; }
+  document.getElementById("status").textContent = s.status;
+  const c = s.current;
+  if (c) {
+    const phase = c.phase === "stop"
+      ? `этап 1/2: ищу, когда остановиться — учусь на 2009–${c.val - 1}, проверяю на отложенном ${c.val}`
+      : `этап 2/2: учусь на ${c.train} (${c.best_epochs} прохода по данным), проверяю на ${c.test}`;
+    document.getElementById("fold").textContent =
+      `год ${c.fold}/${c.folds_total} · ${phase} · шаг ${c.step ?? 0}/${c.total_steps ?? "?"} · ` +
+      `${(c.n_train ?? 0).toLocaleString("ru")} примеров, ${c.model === "finbert" ? "входов" : "словарь"} ${(c.vocab ?? 0).toLocaleString("ru")}`;
+    lineChart(document.getElementById("loss"), c.steps, [
+      { ys: c.train_loss, color: css("--train") }, { ys: c.test_loss, color: css("--accent") }]);
+    lineChart(document.getElementById("auc"), c.steps, [{ ys: c.test_auc, color: css("--accent") }], { hline: 0.5 });
+    if (c.net) drawNet(document.getElementById("neuron"), c.net, s.status === "обучение");
+    else drawNeuron(document.getElementById("neuron"), c.neuron, s.status === "обучение");
+    document.getElementById("netTitle").textContent = c.net
+      ? "Сеть: FinBERT → скрытые нейроны → прогноз" : "Нейрон: какие слова тянут прогноз";
+    document.getElementById("netHint").innerHTML = c.net
+      ? "Слева — что FinBERT понял из заголовка: настроение и 768 «смысловых» чисел (серый блок). В центре — скрытые нейроны, " +
+        "каждый узнаёт свой тип новости. Толщина линии — сила связи; <span class=\"pos\">зелёные</span> тянут вверх, <span class=\"neg\">красные</span> вниз."
+      : "Слева слова из заголовков, справа нейрон «акция обгонит рынок?». Толщина линии — сила веса. " +
+        "<span class=\"pos\">Зелёные</span> тянут вверх, <span class=\"neg\">красные</span> вниз. Веса меняются по ходу обучения.";
+  }
+  const cell = v => `<td class="${cls(v)}">${fmt(v)}</td>`;
+  document.querySelector("#folds tbody").innerHTML = s.folds.map(f =>
+    `<tr><td>${f.test}</td><td>${f.auc.toFixed(4)}</td>${cell(f.ex1.gross)}${cell(f.ex1.net)}` +
+    `${cell(f.ex5.gross)}${cell(f.ex5.net)}</tr>`).join("");
+  if (s.final) {
+    const f = s.final;
+    const block = (h, name) => `<div style="margin-bottom:10px"><div class="big ${cls(f[h].net_mean)}">${name}: ${fmt(f[h].net_mean)} за сделку после издержек</div>` +
+      `<div>95% интервал: [${fmt(f[h].net_lo)}; ${fmt(f[h].net_hi)}] · до издержек ${fmt(f[h].gross_mean)} · ${f[h].n} входов</div>` +
+      `<div>Выбор модели лучше <b>${f[h].placebo_pct}%</b> случайных (нужно 95%+)</div></div>`;
+    document.getElementById("final").innerHTML = block("ex1", "Держим 1 день") + block("ex5", "Держим 5 дней") +
+      `<div>Кривая счёта (вариант «1 день»): по 50% капитала на лонг и шорт.</div>`;
+    lineChart(document.getElementById("equity"), f.equity.map((_, i) => i), [{ ys: f.equity, color: css("--accent") }],
+      { hline: 1, digits: 2, xlabels: f.equity_dates.map(d => d.slice(0, 4)) });
+  }
+  setTimeout(tick, s.status === "готово" ? 5000 : 1000);
+}
+tick();
+</script>
+</body>
+</html>
